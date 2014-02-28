@@ -33,6 +33,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 
 	"github.com/codegangsta/martini"
 )
@@ -198,12 +199,32 @@ type renderer struct {
 }
 
 func (r *renderer) JSON(status int, v interface{}) {
-	var result []byte
+	var data interface{} = v
+	var result interface{}
+
+	if v == nil {
+		// So that empty results produces `[]` and not `null`
+		data = []interface{}{}
+	}
+
+	t := reflect.TypeOf(data)
+
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+
+	if t.Kind() == reflect.Struct {
+		result = copyStruct(reflect.ValueOf(data), t).Interface()
+	} else {
+		result = data
+	}
+
+	var retbyte []byte
 	var err error
 	if r.opt.IndentJSON {
-		result, err = json.MarshalIndent(v, "", "  ")
+		retbyte, err = json.MarshalIndent(result, "", "  ")
 	} else {
-		result, err = json.Marshal(v)
+		retbyte, err = json.Marshal(result)
 	}
 	if err != nil {
 		http.Error(r, err.Error(), 500)
@@ -213,7 +234,43 @@ func (r *renderer) JSON(status int, v interface{}) {
 	// json rendered fine, write out the result
 	r.Header().Set(ContentType, ContentJSON+r.compiledCharset)
 	r.WriteHeader(status)
-	r.Write(result)
+	r.Write(retbyte)
+}
+
+func copyStruct(v reflect.Value, t reflect.Type) reflect.Value {
+	result := reflect.New(t).Elem()
+
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+
+	for i := 0; i < v.NumField(); i++ {
+		if tag := t.Field(i).Tag.Get("out"); tag == "false" {
+			continue
+		}
+
+		vfield := v.Field(i)
+
+		if vfield.Kind() == reflect.Interface {
+			vfield = vfield.Elem()
+
+			for vfield.Kind() == reflect.Ptr {
+				vfield = vfield.Elem()
+			}
+
+			result.Field(i).Set(copyStruct(vfield, reflect.TypeOf(vfield.Interface())))
+			continue
+		}
+
+		if vfield.Kind() == reflect.Struct {
+			result.Field(i).Set(copyStruct(vfield, t.Field(i).Type))
+			continue
+		}
+
+		result.Field(i).Set(v.Field(i))
+	}
+
+	return result
 }
 
 func (r *renderer) HTML(status int, name string, binding interface{}, htmlOpt ...HTMLOptions) {
